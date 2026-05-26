@@ -1,12 +1,17 @@
 import psycopg2
+import os
 from psycopg2 import Error
+from dotenv import load_dotenv
+
+# Load the hidden passwords from the .env file
+load_dotenv()
 
 def connect_to_db():
     """Establishes a connection to the local PostgreSQL database."""
     try:
         connection = psycopg2.connect(
-            user="postgres", # Default pgAdmin username
-            password= DB_PASSWORD, # Replace with your password
+            user="postgres", 
+            password=os.getenv("DB_PASSWORD"), # This securely pulls from your .env file
             host="127.0.0.1",
             port="5432",
             database="ai_stylist"
