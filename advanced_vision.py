@@ -1,13 +1,7 @@
 import os
-import psycopg2
-from psycopg2 import Error
-from dotenv import load_dotenv
 from rembg import remove
 from PIL import Image
 from transformers import pipeline
-
-# Load the hidden password
-load_dotenv()
 
 print("Loading AI Models... (This takes a few seconds)")
 classifier = pipeline("zero-shot-image-classification", model="openai/clip-vit-base-patch32")
@@ -41,77 +35,56 @@ def determine_temperature(color_string):
         return "Warm"
     elif color_string in cool_colors:
         return "Cool"
-    return "Neutral" # For blacks, whites, greys, and beiges
+    return "Neutral"
 
-def save_to_database(user_id, category, sub_category, color, fit):
-    """Opens a connection to PostgreSQL and saves the AI's findings."""
-    try:
-        connection = psycopg2.connect(
-            user="postgres", 
-            password=os.getenv("DB_PASSWORD"), 
-            host="127.0.0.1",
-            port="5432",
-            database="ai_stylist"
-        )
-        cursor = connection.cursor()
-
-        # Execute the INSERT statement
-        insert_query = """
-            INSERT INTO Garments (user_id, category, sub_category, primary_color, color_temperature, fit)
-            VALUES (%s, %s, %s, %s, %s, %s)
-        """
-        
-        # Calculate temperature
-        temp = determine_temperature(color)
-        
-        # We assume tops/jackets are 'Top' and pants/jeans are 'Bottom' based on the word
-        main_category = "Bottom" if "pants" in sub_category or "jeans" in sub_category else "Top"
-        
-        # Pass the variables safely to prevent SQL injection
-        cursor.execute(insert_query, (user_id, main_category, sub_category, color, temp, fit))
-        connection.commit()
-        
-        print("\n✅ SUCCESS: Garment automatically saved to the PostgreSQL database!")
-
-    except Error as e:
-        print(f"\n❌ Database Error: {e}")
-    finally:
-        if connection:
-            cursor.close()
-            connection.close()
-
-def analyze_clothing(image_path, user_id=1):
+def analyze_clothing_model(image_path):
+    """Analyzes an image and returns clothing metadata with high-accuracy prompting."""
     clean_image = preprocess_image(image_path)
-    if not clean_image: return
+    if not clean_image: 
+        raise Exception("Failed to preprocess image")
 
-    # The AI's Descriptive Menu
-    category_labels = ["t-shirt", "casual button-down shirt", "jeans", "cargo pants", "jacket"]
-    color_labels = ["white", "black", "navy blue", "sky blue", "olive green", "crimson red", "yellow", "grey"]
-    fit_labels = ["tight slim fit", "regular straight fit", "loose baggy fit", "oversized dropped-shoulder fit"]
+    # 1. Improved Labels (Making them sound like natural sentences for the AI)
+    category_labels = ["a pair of jeans", "a pair of cargo pants", "a t-shirt", "a button-down shirt", "a jacket or coat"]
+    color_labels = ["black", "navy blue", "white", "grey", "olive green", "sky blue", "crimson red", "yellow"]
+    fit_labels = ["slim fit clothing", "regular straight fit clothing", "loose baggy clothing", "oversized clothing"]
 
-    print("\n--- AI is scanning the clothing... ---")
-    
-    # Run the AI
-    cat_res = classifier(clean_image, candidate_labels=category_labels)
-    col_res = classifier(clean_image, candidate_labels=color_labels)
-    fit_res = classifier(clean_image, candidate_labels=fit_labels)
+    # 2. Improved Prompting (Guiding the AI on exactly what to look for)
+    cat_res = classifier(
+        clean_image, 
+        candidate_labels=category_labels, 
+        hypothesis_template="This is a photo of {}."
+    )
+    col_res = classifier(
+        clean_image, 
+        candidate_labels=color_labels, 
+        hypothesis_template="The primary color of this clothing item is {}."
+    )
+    fit_res = classifier(
+        clean_image, 
+        candidate_labels=fit_labels, 
+        hypothesis_template="The fit or silhouette of this clothing item is extremely {}."
+    )
 
-    # 1. Extract the raw text of the top prediction
     raw_category = cat_res[0]['label']
     raw_color = col_res[0]['label']
     raw_fit = fit_res[0]['label']
     
-    # 2. Map the descriptive fit back to the strict database rules
+    # Map back to our simple database rules
     db_fit = "Regular"
     if "slim" in raw_fit: db_fit = "Slim"
     elif "baggy" in raw_fit: db_fit = "Baggy"
     elif "oversized" in raw_fit: db_fit = "Oversized"
 
-    print(f"Detected: {raw_color} {raw_category} ({db_fit} fit)")
+    # Clean up the category name for the database
+    db_cat = raw_category.replace("a pair of ", "").replace("a ", "")
 
-    # 3. Save it directly to the database!
-    save_to_database(user_id, raw_category, raw_category, raw_color, db_fit)
+    temperature = determine_temperature(raw_color)
+    main_category = "Bottom" if "pants" in db_cat or "jeans" in db_cat else "Top"
 
-if __name__ == "__main__":
-    # Test it with a photo!
-    analyze_clothing("test_shirt.jpg", user_id=1)
+    return {
+        "category": main_category,
+        "sub_category": db_cat,
+        "color": raw_color,
+        "temperature": temperature,
+        "fit": db_fit
+    }
