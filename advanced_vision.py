@@ -35,7 +35,30 @@ def determine_temperature(color_string):
         return "Warm"
     elif color_string in cool_colors:
         return "Cool"
-    return "Neutral"
+import cv2
+import numpy as np
+from sklearn.cluster import KMeans
+
+def get_dominant_hex(image_path, k=3):
+    """Extracts the most dominant color from the clothing item using KMeans clustering."""
+    image = cv2.imread(image_path)
+    if image is None: return "#000000"
+    image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+    
+    pixels = image.reshape(-1, 3)
+    # Ignore pure white background
+    non_white_pixels = pixels[np.any(pixels < [240, 240, 240], axis=1)]
+    if len(non_white_pixels) == 0: return "#ffffff"
+        
+    if len(non_white_pixels) > 5000:
+        indices = np.random.choice(len(non_white_pixels), 5000, replace=False)
+        non_white_pixels = non_white_pixels[indices]
+        
+    kmeans = KMeans(n_clusters=k, n_init=3)
+    kmeans.fit(non_white_pixels)
+    counts = np.bincount(kmeans.labels_)
+    dominant_color = kmeans.cluster_centers_[np.argmax(counts)]
+    return '#{:02x}{:02x}{:02x}'.format(int(dominant_color[0]), int(dominant_color[1]), int(dominant_color[2]))
 
 def analyze_clothing_model(image_path):
     """Analyzes an image and returns clothing metadata with high-accuracy prompting."""
@@ -49,21 +72,9 @@ def analyze_clothing_model(image_path):
     fit_labels = ["slim fit clothing", "regular straight fit clothing", "loose baggy clothing", "oversized clothing"]
 
     # 2. Improved Prompting (Guiding the AI on exactly what to look for)
-    cat_res = classifier(
-        clean_image, 
-        candidate_labels=category_labels, 
-        hypothesis_template="This is a photo of {}."
-    )
-    col_res = classifier(
-        clean_image, 
-        candidate_labels=color_labels, 
-        hypothesis_template="The primary color of this clothing item is {}."
-    )
-    fit_res = classifier(
-        clean_image, 
-        candidate_labels=fit_labels, 
-        hypothesis_template="The fit or silhouette of this clothing item is extremely {}."
-    )
+    cat_res = classifier(clean_image, candidate_labels=category_labels, hypothesis_template="This is a photo of {}.")
+    col_res = classifier(clean_image, candidate_labels=color_labels, hypothesis_template="The primary color of this clothing item is {}.")
+    fit_res = classifier(clean_image, candidate_labels=fit_labels, hypothesis_template="The fit or silhouette of this clothing item is extremely {}.")
 
     raw_category = cat_res[0]['label']
     raw_color = col_res[0]['label']
@@ -80,11 +91,15 @@ def analyze_clothing_model(image_path):
 
     temperature = determine_temperature(raw_color)
     main_category = "Bottom" if "pants" in db_cat or "jeans" in db_cat else "Top"
+    
+    # 3. OpenCV Advanced Color Extraction
+    hex_code = get_dominant_hex("clean_subject.png")
 
     return {
         "category": main_category,
         "sub_category": db_cat,
         "color": raw_color,
+        "hex_code": hex_code,
         "temperature": temperature,
         "fit": db_fit
     }

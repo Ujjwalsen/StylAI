@@ -27,6 +27,25 @@ url = os.environ.get("SUPABASE_URL", "")
 key = os.environ.get("SUPABASE_KEY", "")
 supabase = create_client(url, key)
 
+class UserSyncRequest(BaseModel):
+    email: str
+    auth_id: str
+
+@app.post("/users/sync")
+def sync_user(req: UserSyncRequest):
+    res = supabase.table("users").select("*").eq("username", req.email).execute()
+    if res.data:
+        return {"user_id": res.data[0]["user_id"]}
+    else:
+        new_user = {
+            "username": req.email,
+            "skin_undertone": "Neutral",
+            "body_shape": "Rectangle",
+            "style_preference": "Casual"
+        }
+        insert_res = supabase.table("users").insert(new_user).execute()
+        return {"user_id": insert_res.data[0]["user_id"]}
+
 @app.get("/")
 def read_root():
     return {"message": "StylAI Backend is running!"}
@@ -78,7 +97,7 @@ async def upload_garment(user_id: int = Form(...), file: UploadFile = File(...))
         "user_id": user_id,
         "category": ai_data["category"],
         "sub_category": ai_data["sub_category"],
-        "primary_color": ai_data["color"],
+        "primary_color": f"{ai_data['color']} | {ai_data['hex_code']}",
         "color_temperature": ai_data["temperature"],
         "fit": ai_data["fit"],
         "image_url": image_url,
@@ -89,8 +108,8 @@ async def upload_garment(user_id: int = Form(...), file: UploadFile = File(...))
     return {"message": "Garment analyzed and saved!", "data": res.data[0]}
 
 @app.get("/style/{user_id}")
-def generate_style(user_id: int):
-    """Fetches user data and generates an outfit."""
+def generate_style(user_id: int, occasion: str = "Casual", city: str = "New York"):
+    """Fetches user data and generates an outfit using Generative AI."""
     # 1. Fetch User Data
     user_res = supabase.table("users").select("*").eq("user_id", user_id).execute()
     if not user_res.data:
@@ -104,12 +123,38 @@ def generate_style(user_id: int):
     if not wardrobe:
         raise HTTPException(status_code=400, detail="Wardrobe is empty")
         
-    # 3. Run Matching Algorithm (refactored stylist.py)
-    outfit = match_outfit(user, wardrobe)
+    # 3. Run Matching Algorithm (Gemini)
+    outfit = match_outfit(user, wardrobe, occasion, city)
     if not outfit:
-         raise HTTPException(status_code=400, detail="Could not find a suitable outfit combination based on your styling rules.")
+         raise HTTPException(status_code=400, detail="Gemini could not find a suitable outfit combination.")
          
     return {"outfit": outfit}
+
+class TryOnRequest(BaseModel):
+    prompt: str
+
+@app.post("/try-on")
+def virtual_try_on(req: TryOnRequest):
+    """Generates an image of a model wearing the outfit using Replicate."""
+    import replicate
+    api_token = os.environ.get("REPLICATE_API_TOKEN")
+    if not api_token:
+        raise HTTPException(status_code=500, detail="Replicate API token missing")
+        
+    try:
+        output = replicate.run(
+            "bytedance/sdxl-lightning-4step:5599ed30703defd1d160a25a63321b4dec97101d98b4674bcc56e41f62f35637",
+            input={
+                "prompt": f"A highly realistic fashion editorial full body portrait of a person wearing {req.prompt}. Studio lighting, Vogue magazine style, highly detailed.",
+                "width": 768,
+                "height": 1024,
+                "num_inference_steps": 4,
+                "guidance_scale": 0,
+            }
+        )
+        return {"image_url": output[0]}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.delete("/garments/{garment_id}")
 def delete_garment(garment_id: int):

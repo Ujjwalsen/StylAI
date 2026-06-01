@@ -1,57 +1,79 @@
-def match_outfit(user_profile, wardrobe):
+import os
+import json
+import requests
+import google.generativeai as genai
+
+def get_weather(city="New York"):
+    """Fetches real-time weather from OpenWeatherMap"""
+    api_key = os.environ.get("OPENWEATHER_API_KEY")
+    if not api_key: return "70°F, Clear"
+    
+    try:
+        res = requests.get(f"https://api.openweathermap.org/data/2.5/weather?q={city}&appid={api_key}&units=imperial")
+        data = res.json()
+        temp = data['main']['temp']
+        desc = data['weather'][0]['description']
+        return f"{temp}°F, {desc}"
+    except Exception as e:
+        print("Weather API error:", e)
+        return "70°F, Clear"
+
+def match_outfit(user_profile, wardrobe, occasion="Casual", city="New York"):
     """
-    The core logic engine that matches clothes based on rules.
-    Accepts:
-        user_profile (dict): The user's settings (skin_undertone, style_preference, etc)
-        wardrobe (list of dicts): The list of garments from Supabase DB.
+    Uses Gemini LLM to generate the absolute best outfit from the wardrobe.
+    """
+    genai.configure(api_key=os.environ.get("GEMINI_API_KEY"))
+    model = genai.GenerativeModel('gemini-2.5-flash')
+    
+    weather = get_weather(city)
+    
+    # Filter out items that are missing essential data
+    clean_wardrobe = [
+        {"garment_id": w['garment_id'], "category": w['category'], "sub_category": w['sub_category'], "color": w['primary_color'], "fit": w['fit']} 
+        for w in wardrobe
+    ]
+
+    prompt = f"""
+    You are an expert high-fashion celebrity stylist.
+    Your client has the following profile:
+    - Undertone: {user_profile.get('skin_undertone', 'Neutral')}
+    - Style Preference: {user_profile.get('style_preference', 'Casual')}
+    
+    They are dressing for this occasion: {occasion}
+    The current weather in their city is: {weather}
+    
+    Here is their digital wardrobe (JSON):
+    {json.dumps(clean_wardrobe, indent=2)}
+    
+    Rules:
+    1. You must pick exactly one 'Top' and exactly one 'Bottom' from the wardrobe.
+    2. The outfit must be functionally appropriate for the weather.
+    3. The outfit must match the occasion.
+    4. Provide a creative, natural language reason (2-3 sentences) explaining why this outfit works perfectly for them today.
+    
+    Return ONLY a raw JSON object (without markdown code blocks) in this exact format:
+    {{
+       "top_id": <garment_id of chosen top>,
+       "bottom_id": <garment_id of chosen bottom>,
+       "reason": "<your explanation here>"
+    }}
     """
     
-    undertone = user_profile.get("skin_undertone", "Neutral")
-    style_pref = user_profile.get("style_preference", "Casual")
-    
-    # Sort garments by category
-    tops = [item for item in wardrobe if item.get('category') == 'Top']
-    bottoms = [item for item in wardrobe if item.get('category') == 'Bottom']
-
-    outfits = []
-
-    for top in tops:
-        for bottom in bottoms:
-            score = 5 # Base starting score
-            
-            top_temp = top.get('color_temperature')
-            bot_temp = bottom.get('color_temperature')
-            top_fit = top.get('fit')
-            bot_fit = bottom.get('fit')
-
-            # Rule A: Color Theory Match
-            if top_temp == undertone:
-                score += 2
-            if bot_temp == undertone:
-                score += 2
-
-            # Rule B: Silhouette Balance
-            if top_fit == 'Oversized' and bot_fit == 'Baggy':
-                if style_pref == 'Streetwear':
-                    score += 3
-                else:
-                    score -= 2 
-
-            outfits.append({
-                "top": top,
-                "bottom": bottom,
-                "score": score
-            })
-
-    if not outfits:
+    try:
+        response = model.generate_content(prompt)
+        text = response.text.replace('```json', '').replace('```', '').strip()
+        result = json.loads(text)
+        
+        top = next(item for item in wardrobe if item['garment_id'] == result['top_id'])
+        bottom = next(item for item in wardrobe if item['garment_id'] == result['bottom_id'])
+        
+        return {
+            "top": top,
+            "bottom": bottom,
+            "reason": result['reason'],
+            "weather": weather
+        }
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
         return None
-
-    # Sort the outfits from highest score to lowest
-    outfits.sort(key=lambda x: x['score'], reverse=True)
-    
-    import random
-    # Grab the top 3 highest scoring outfits (or fewer if there aren't 3)
-    top_contenders = outfits[:3]
-    
-    # Return a random choice from those top outfits to maintain variety!
-    return random.choice(top_contenders)
